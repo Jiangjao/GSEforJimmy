@@ -1,0 +1,389 @@
+---
+title: 'GSE14762'
+author: "Teemo"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F,message = F,collapse=TRUE)
+```
+
+### 一、数据集介绍
+
+- GEO链接： https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE14762
+
+- 芯片平台： [GPL4866](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GPL4866),  Affymetrix GeneChip Human Genome U133 Plus 2.0 Array [MBNI v6 Entrez Gene ID CDF]
+
+样品列表：
+
+```
+             title        source_name_ch1
+GSM368639	Clear cell renal carcinoma CC010
+GSM368640	Clear cell renal carcinoma CC011
+GSM368641	Clear cell renal carcinoma CC015
+GSM368642	Clear cell renal carcinoma CC033
+GSM368643	Clear cell renal carcinoma CC048
+GSM368644	Clear cell renal carcinoma CC059
+GSM368645	Clear cell renal carcinoma CC076
+GSM368646	Clear cell renal carcinoma CC081
+GSM368647	Clear cell renal carcinoma CC123
+GSM368648	Clear cell renal carcinoma CC124
+```
+
+- 文章链接是：Regulation of endocytosis via the oxygen-sensing pathway. Nat Med 2009 Mar;15(3):319-24. PMID: 19252501(https://pubmed.ncbi.nlm.nih.gov/19252501/)
+
+### 二、核心步骤
+
+#### 1. R包加载
+```{r}
+rm(list = ls())
+library(AnnoProbe)
+library(GEOquery)  
+library(ggplot2) 
+library(ggstatsplot) 
+library(reshape2)
+library(patchwork)
+```
+
+#### 2. 获取并且检查表达量矩阵
+
+* 主要是得是否需要log
+```{r}
+# 获取表达量矩阵
+gse_number <- 'GSE14762'
+gset <- geoChina(gse_number)
+a=gset[[1]] 
+dat=exprs(a) 
+dim(dat)
+
+# 检查，判断需不需要取log
+dat[1:4,1:4] 
+boxplot(dat[,1:4],las=2)
+library(limma)
+dat=normalizeBetweenArrays(dat)
+
+# 画图，使用ggplot需宽数据变长数据
+class(dat)
+data <- as.data.frame(dat)
+data <- melt(data)
+head(data)
+title <- paste (gse_number, "/", a@annotation, sep ="")
+p1 <- ggplot(data,aes(x=variable,y=value))+
+      geom_boxplot()+
+      theme_ggstatsplot()+
+      theme(panel.grid = element_blank(),
+            axis.text=element_text(size=10,face = 'bold'),
+            axis.text.x=element_text(angle=90),
+            plot.title = element_text(hjust = 0.5,size =15))+
+      xlab('')+
+      ylab('')+
+      ggtitle(title)
+p1
+```
+
+可以看到，处理前后我们的表达量矩阵的表达量范围箱线图如下所示：
+
+#### 3. 根据生物学背景及研究目的人为分组
+```{r}
+pd=pData(a) 
+#通过查看说明书知道取对象a里的临床信息用pData
+## 挑选一些感兴趣的临床表型。
+head(pd)[,1:4]
+library(stringr)  
+group_list=ifelse(grepl('Normal',pd$title),'control','ccRCC')
+table(group_list)
+#所以文章写错了，第一,该数据集不是配对样本;第二，control是12个，而tumor是10个。
+```
+
+为了演示方便，我们这里仅仅是区分"ccRCC"和“control”。
+
+#### 4. probe_id 和symbol的转换至表达矩阵
+
+* 获取芯片注释信息
+```{r}
+gpl_number='GPL4866'
+  gpl = getGEO(gpl_number,destdir = ".")
+  id_pre = gpl@dataTable@table
+  colnames(id_pre)
+  ids2 = id_pre[,c("ID","Symbol")]
+  colnames(ids2) = c("probe_id","symbol")
+  ids2 = ids2[ids2$symbol!=" " & ids2$symbol!="NA" & !str_detect(ids2$symbol,"///") & rownames(ids2)!="NA",]
+head(ids2)
+#可以看到此芯片的探针与基因ID或者symbol的对应关系如下所示：
+```
+
+* 整理芯片注释信息，使探针与基因symbol无重复且一一对应
+```{r}
+library(tidyr)
+library(dplyr)
+library(stringr)
+ids=ids2
+
+#接下来，使探针与基因symbol一一对应
+ids=as.data.frame(ids)
+table(rownames(dat) %in% ids$probe_id)
+dat=dat[rownames(dat) %in% ids$probe_id,]
+ids=ids[match(rownames(dat),ids$probe_id),]
+ids$probe_id=as.character(ids$probe_id)
+rownames(dat)=ids$probe_id
+ids=ids[ids$probe_id %in%  rownames(dat),]
+dat=dat[ids$probe_id,]
+
+#下一步是：基因symbol去冗余-按照表达量最大值筛选
+ids$median=apply(dat,1,median)
+#ids新建median这一列，列名为median，同时对dat这个矩阵按行操作，取每一行的中位数，将结果给到median这一列的每一行
+ids=ids[order(ids$symbol,ids$median,decreasing = T),] 
+#对ids$symbol按照ids$median中位数从大到小排列的顺序排序，将对应的行赋值为一个新的ids
+ids=ids[!duplicated(ids$symbol),]#将symbol这一列取取出重复项，'!'为否，即取出不重复的项，去除重复的gene ，保留每个基因最大表达量结果s
+#获得去冗余之后的dat/exp
+dat=dat[ids$probe_id,] #新的ids取出probe_id这一列，将dat按照取出的这一列中的每一行组成一个新的dat
+#把ids的symbol这一列中的每一行给dat作为dat的行名
+rownames(dat)=ids$symbol
+table(group_list)
+```
+
+最后得到了表达量矩阵如下所示：
+
+```r
+> dat[1:4,1:4]  #保留每个基因ID第一次出现的信息
+        GSM368639 GSM368640 GSM368641 GSM368642
+ZZZ3     8.929182  9.282114  8.691409  8.472818
+ZZEF1    7.734955  7.882182  7.523364  7.622455
+ZYX      9.358477  9.783455  9.765068  9.470250
+ZYG11BL  7.619727  7.845136  7.838159  7.520841
+
+```
+
+以及最简单的2分组，如下所示：
+
+```R
+>table(group_list)
+group_list
+  ccRCC control 
+     10      12  
+```
+
+保存为R数据文件：step1-output.Rdata
+```{r}
+save(dat,ids,group_list,gse_number,file = "step1-output.Rdata")
+```
+
+### 三、标准步骤之质控
+
+得到标准的**3张图**，包括主成分分析，高变基因的表达量热图，样品相关性热图
+
+```{r}
+## 下面是画PCA的必须操作，需要看说明书。
+exp <- dat
+exp=t(exp)#画PCA图时要求是行名时样本名，列名时探针名，因此此时需要转换
+exp=as.data.frame(exp)#将matrix转换为data.frame 
+library("FactoMineR")#画主成分分析图需要加载这两个包
+library("factoextra")  
+dat.pca <- PCA(exp , graph = FALSE)#现在exp最后一列是group_list，需要重新赋值给一个dat.pca,这个矩阵是不含有分组信息的
+dim(exp)
+exp[,12488]
+# 画图，主成分分析图p2
+this_title <- paste0(gse_number,'_PCA')
+p2 <- fviz_pca_ind(dat.pca,
+                         geom.ind = "point", # show points only (nbut not "text")
+                         col.ind = group_list, # color by groups
+                         palette = "Dark2",
+                         addEllipses = TRUE, # Concentration ellipses
+                         legend.title = "Groups")+
+                   ggtitle(this_title)+
+                   theme_ggstatsplot()+
+                   theme(plot.title = element_text(size=15,hjust = 0.5))
+
+p2
+
+# 下面是1000_sd热图
+library(pheatmap)
+cg=names(tail(sort(apply(dat,1,sd)),1000))#apply按行（'1'是按行取，'2'是按列取）取每一行的方差，从小到大排序，取最大的1000个
+n=t(scale(t(dat[cg,]))) 
+n[n>2]=2 
+n[n< -2]= -2
+n[1:4,1:4]
+ac=data.frame(Group=group_list)
+rownames(ac)=colnames(n)
+# 画图，高变基因的表达量热图p3
+p3 <- pheatmap::pheatmap(n,
+               show_colnames =F,
+               show_rownames = F,
+               main = gse_number,
+               annotation_col=ac,
+               breaks = seq(-3,3,length.out = 100))#因为已经手动设置了表达量最大值，所以，可以不用设置break
+p3
+
+# 画图，样品相关性热图p4
+colD=data.frame(Group=group_list)
+exprSet=t(exp)
+rownames(colD)=colnames(exprSet)#问题-exprSet设置成转置后的exp
+p4 <- pheatmap::pheatmap(cor(exprSet),#热图对样本-列 操作
+                   annotation_col = colD,
+                   show_rownames = F,
+                   main = gse_number
+                   )
+p4
+```
+
+### 四、标准步骤之limma差异分析
+
+
+```{r}
+library(limma)
+design=model.matrix(~factor( group_list ))
+fit=lmFit(dat,design)
+fit=eBayes(fit)
+options(digits = 4) #设置全局的数字有效位数为4
+deg = topTable(fit,coef=2,adjust='BH', n=Inf) 
+```
+
+有了差异分析就可以进行标准的可视化，包括**火山图和上下调的差异基因热图**
+
+```{r}
+nrDEG=deg
+head(nrDEG)
+attach(nrDEG)
+plot(logFC,-log10(P.Value))#简单画图看一下
+df=nrDEG
+df$v= -log10(P.Value) #df新增加一列'v',作为新的绘图参数，值为-log10(P.Value) 
+#设定上下调基因
+df$g=ifelse(df$P.Value>0.05,'stable', 
+              ifelse( df$logFC >2,'up', 
+                      ifelse( df$logFC < -2,'down','stable') )
+)
+#统计上下调基因数量
+table(df$g)
+#给绘制火山图用的数据新增一列symbol
+df$name=rownames(df)
+head(df)
+logFC_t = 2
+#设置可循环使用的plot标题
+this_tile <- paste0('Cutoff for logFC is ',round(logFC_t,3),
+                      '\nThe number of up gene is ',nrow(df[df$g == 'up',]) ,
+                      '\nThe number of down gene is ',nrow(df[df$g == 'down',])
+)
+#画图，火山图p5
+p5 <- ggplot(data = df, 
+              aes(x = logFC, 
+                  y = -log10(P.Value))) +
+    geom_point(alpha=0.6, size=1.5, 
+               aes(color=g)) +
+    ylab("-log10(Pvalue)")+
+    scale_color_manual(values=c("#34bfb5", "#828586","#ff6633"))+
+    geom_vline(xintercept= 0,lty=4,col="grey",lwd=0.8) +
+    xlim(-3, 3)+
+    theme_classic()+
+    ggtitle(this_tile )+
+    theme(plot.title = element_text(size=12,hjust = 0.5),
+          legend.title = element_blank(),
+          )
+p5
+
+#热图
+library(pheatmap)
+x=deg$logFC 
+names(x)=rownames(deg) 
+cg=c(names(head(sort(x),100)),
+       names(tail(sort(x),100)))#对x进行从小到大排列，取前100及后100，并取其对应的探针名，作为向量赋值给cg
+n=t(scale(t(dat[cg,])))
+n[n>2]=2
+n[n< -2]= -2
+n[1:4,1:4]
+pheatmap(n,show_colnames =F,show_rownames = F)
+ac=data.frame(group=group_list)
+rownames(ac)=colnames(n) 
+# 画图，上下调的差异基因热图p6
+p6 <- pheatmap(n,show_colnames =F,
+           show_rownames = F,
+           cluster_cols = T, 
+           main = gse_number,
+           annotation_col=ac) 
+p6
+```
+
+
+### 五、标准步骤之生物学功能数据库注释
+
+我们这里不根据**任何武断的阈值来区分统计学显著的上下调基因**，而是直接根据基因的变化情况排序进行gsea分析，而且仅仅是展示kegg这个生物学功能数据库的注释情况！
+
+* gsea分析需要基因的ENTREZID，需要根据物种进行转换
+```{r}
+# 加ENTREZID列，用于富集分析（symbol转entrezid，然后inner_join）
+deg$symbol=rownames(deg)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+s2e <- bitr(deg$symbol, 
+            fromType = "SYMBOL",
+            toType = "ENTREZID",
+            OrgDb = org.Hs.eg.db)#人
+#bitr()用于SYMBOL转ENTREZID
+#其他物种http://bioconductor.org/packages/release/BiocViews.html#___OrgDb
+dim(deg)
+dim(s2e)
+setdiff(deg$symbol,s2e$SYMBOL)
+DEG <- inner_join(deg,s2e,by=c("symbol"="SYMBOL"))
+
+```
+
+
+* 进行gsea富集
+```{r}
+library(dplyr)
+library(ggplot2)  
+geneList=DEG$logFC
+names(geneList)=DEG$ENTREZID
+geneList=sort(geneList,decreasing = T)
+head(geneList)
+library(clusterProfiler)
+kk_gse <- gseKEGG(geneList     = geneList,
+                  organism     = 'hsa',#按需替换
+                  #nPerm        = 1000,
+                  minGSSize    = 10,
+                  pvalueCutoff = 0.9,
+                  verbose      = FALSE)
+tmp=kk_gse@result
+dim(tmp)
+kk=DOSE::setReadable(kk_gse, OrgDb='org.Hs.eg.db',keyType='ENTREZID')#按需替换
+#DOSE::setReadable():mapping geneID to gene Symbol
+tmp=kk@result
+dim(tmp)
+pro='comp1'
+write.csv(kk@result,paste0(pro,'_kegg.gsea.csv'))
+save(kk,file = 'gsea_kk.Rdata')
+```
+
+上面的kk这个变量就存储了kegg这个生物学功能数据库的gsea分析结果，我们进行简单可视化，代码如下：
+
+```{r}
+# 展现前6个上调通路和6个下调通路
+down_k <- kk_gse[tail(order(kk_gse$enrichmentScore,decreasing = F)),];down_k$group=-1
+up_k <- kk_gse[head(order(kk_gse$enrichmentScore,decreasing = F)),];up_k$group=1
+
+dat=rbind(up_k,down_k)
+colnames(dat)
+dat$pvalue = -log10(dat$pvalue)
+dat$pvalue=dat$pvalue*dat$group 
+dat=dat[order(dat$pvalue,decreasing = F),]
+# gsea分析结果p7
+p7<- ggplot(dat, aes(x=reorder(Description,order(pvalue, decreasing = F)), y=pvalue, fill=group)) + 
+  geom_bar(stat="identity") + 
+  scale_fill_gradient(low="#34bfb5",high="#ff6633",guide = FALSE) + 
+  scale_x_discrete(name ="Pathway names") +
+  scale_y_continuous(name ="log10P-value") +
+  coord_flip() + 
+  theme_ggstatsplot()+
+  theme(plot.title = element_text(size = 15,hjust = 0.5),  
+        axis.text = element_text(size = 12,face = 'bold'),
+        panel.grid = element_blank())+
+  ggtitle("Pathway Enrichment") 
+p7
+#具体看上面条形图里面的每个通路的gsea分布情况p8
+library(enrichplot)
+p8 <- gseaplot2(kk, geneSetID = rownames(down_k))+
+      gseaplot2(kk, geneSetID = rownames(up_k))
+p8
+```
+
